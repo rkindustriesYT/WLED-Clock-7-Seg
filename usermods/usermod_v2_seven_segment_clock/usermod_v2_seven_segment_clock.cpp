@@ -49,6 +49,29 @@ class SevenSegmentClockUsermod : public Usermod {
   char order[8] = "cbafedg";
   // mapIdx translates standard letter positions (a..g) to physical block indices
   uint8_t mapIdx[7] = {0,1,2,3,4,5,6};
+  /*
+   * Cached geometry (CRITICAL)
+   * - These values are precomputed to speed up rendering and MUST be recomputed
+   *   whenever configuration values change (baseOffset, segPixels, dotPixels,
+   *   numDigits, rightToLeft or order). Failure to recompute will cause incorrect
+   *   digit placement (silent visual bugs) or out-of-bounds writes.
+   *
+   * Risks & symptoms if stale or incorrect:
+   * - Digits display at wrong positions (looks shifted)
+   * - Colons appear in wrong place or all LEDs stay on
+   * - Out-of-bounds writes causing random LED colors, crashes, or heap corruption
+   *
+   * Mitigations:
+   * - Call computeGeometry() after any config change (see readFromConfig & setup)
+   * - Keep array bounds checks in digitStart() and clamp writes in writeDigit()
+   * - If you edit geometry logic, re-run device tests: toggle enabled, change
+   *   baseOffset/segPixels/dotPixels, switch 4<->6 digits, observe behavior.
+   */
+  // Cached geometry: precomputed once after config changes to avoid per-frame arithmetic
+  uint16_t segGroupLen = 0;           // = segPixels * 7 (segments per digit + spacing)
+  uint16_t digitIndices[6] = {0};     // Starting LED index for each digit (0-5)
+  uint16_t colon1Idx = 0;             // First colon (HH:MM divider) starting index
+  uint16_t colon2Idx = 0;             // Second colon (MM:SS divider) starting index, for 6-digit mode
   // Cache for blink state to avoid repeated second() calls
   bool lastBlinkState = false;
   uint8_t lastSecond = 255;
@@ -65,9 +88,23 @@ class SevenSegmentClockUsermod : public Usermod {
       }
     }
   }
+  // CRITICAL: Precompute all geometry once. Call after any config change (setup, readFromConfig).
+  // This eliminates repeated arithmetic in the hot render path.
+  void computeGeometry() {
+    segGroupLen = segPixels * 7;  // 7 segments per digit
+    // Precompute starting LED index for each digit (0-5)
+    for (uint8_t i = 0; i < 6; i++) {
+      digitIndices[i] = baseOffset + (i * segGroupLen) + ((i / 2) * dotPixels);
+    }
+    // Colon positions: inserted after every 2 digits (HH | MM | SS)
+    colon1Idx = baseOffset + (2 * segGroupLen);          // after HH
+    colon2Idx = baseOffset + (4 * segGroupLen) + dotPixels;  // after MM
+  }
   // Compute starting LED index for a digit, including colon spacing
+  // Uses precomputed digitIndices array (set in computeGeometry) for O(1) lookup.
+  // Bounds-checked to prevent array overflow.
   uint16_t digitStart(uint8_t index) {
-    return baseOffset + (index * (segPixels * 7)) + ((index / 2) * dotPixels);
+    return (index < 6) ? digitIndices[index] : baseOffset;
   }
   // Render a single digit: lights OFF for segments not used by the digit
   // Lighting ON color comes from the running WLED effect; we only clear segments that are off
@@ -78,7 +115,10 @@ class SevenSegmentClockUsermod : public Usermod {
       uint16_t offset = digitBase + (mapIdx[s] * segPixels);
       bool on = ((digit >> (6 - s)) & 0x01);
       if (!on) {
-        for (uint16_t j = offset; j < offset + segPixels; j++) {
+        uint16_t end = offset + segPixels;
+        // Clamp end to prevent out-of-bounds writes (safety critical for ESP8266 stability)
+        if (end > strip.getLength()) end = strip.getLength();
+        for (uint16_t j = offset; j < end; j++) {
           strip.setPixelColor(j, 0x000000);
         }
       }
@@ -93,9 +133,9 @@ class SevenSegmentClockUsermod : public Usermod {
       lastBlinkState = (curSecond % 2 == 0);
     }
     
-    // first colon between hour and minute
+    // first colon between hour and minute (uses precomputed colon1Idx for speed)
     for (uint8_t i = 0; i < dotPixels; i++) {
-      uint16_t dot = baseOffset + 2 * (segPixels * 7) + i;
+      uint16_t dot = colon1Idx + i;  // cached: no arithmetic needed
       if (!showDots) {
         strip.setPixelColor(dot, 0x000000); // hide
       } else if (blinkDotsEnabled && lastBlinkState) {
@@ -106,7 +146,7 @@ class SevenSegmentClockUsermod : public Usermod {
     // optional second colon between minute and second (for 6 digits)
     if (numDigits == 6) {
       for (uint8_t i = 0; i < dotPixels; i++) {
-        uint16_t dot2 = baseOffset + 4 * (segPixels * 7) + dotPixels + i;
+        uint16_t dot2 = colon2Idx + i;  // cached: no arithmetic needed
         if (!showDots) {
           strip.setPixelColor(dot2, 0x000000); // hide
         } else if (blinkDotsEnabled && lastBlinkState) {
@@ -118,7 +158,10 @@ class SevenSegmentClockUsermod : public Usermod {
   }
 public:
   // Initialize mapping based on the configured order
-  void setup() override { applyOrder(); }
+  void setup() override { 
+    applyOrder(); 
+    computeGeometry();  // CRITICAL: Must compute cached geometry before first render
+  }
   void loop() override {
     if (!enabled) return;
     if (millis() - lastUpdate < refreshMs) return;
@@ -168,6 +211,17 @@ public:
     char buf[9];
     byte h = hour(localTime);
     byte m = minute(localTime);
+    // Ensure cached geometry is up-to-date before reporting diagnostics
+    computeGeometry();
+    // compute required LED length: cover last digit and any colon dots
+    uint16_t lastDigitStart = digitStart((numDigits >= 1) ? (numDigits - 1) : 0);
+    uint16_t needDigit = lastDigitStart + segGroupLen; // one past last used LED for digits
+    uint16_t needColon1 = colon1Idx + dotPixels;
+    uint16_t needColon2 = colon2Idx + dotPixels;
+    uint16_t requiredLength = max(needDigit, max(needColon1, needColon2));
+    bool geometryValid = (requiredLength <= strip.getLength());
+    info["requiredLength"] = requiredLength;
+    info["geometryValid"] = geometryValid;
     if (useAmPm) {
       bool pm = h >= 12;
       if (h > 12) h -= 12;
@@ -221,6 +275,8 @@ public:
     if (numDigits != 4 && numDigits != 6) numDigits = 4;
     if (segPixels < 1) segPixels = 1;
     if (dotPixels < 1) dotPixels = 1;
+    // CRITICAL: Recompute cached geometry after config changes to keep data in sync
+    computeGeometry();
     return true;
   }
 };
