@@ -28,7 +28,8 @@ class SevenSegmentClockUsermod : public Usermod {
   bool showDots = true;
   bool blinkDotsEnabled = true;
   // 7‑segment digit patterns using standard abcdefg bit order: a=bit6 … g=bit0
-  byte digitsMatrix[12] = {
+  // mark const to prefer flash storage where supported
+  const byte digitsMatrix[12] = {
     //abcdefg
     0b1111110, // 0
     0b0110000, // 1
@@ -48,6 +49,9 @@ class SevenSegmentClockUsermod : public Usermod {
   char order[8] = "cbafedg";
   // mapIdx translates standard letter positions (a..g) to physical block indices
   uint8_t mapIdx[7] = {0,1,2,3,4,5,6};
+  // Cached derived geometry to avoid recomputing multiplications
+  uint16_t segGroupLen = 0; // segPixels * 7
+  uint16_t requiredLength = 0; // number of pixels needed starting at baseOffset
   // Cache for blink state to avoid repeated second() calls
   bool lastBlinkState = false;
   uint8_t lastSecond = 255;
@@ -64,9 +68,23 @@ class SevenSegmentClockUsermod : public Usermod {
       }
     }
   }
+  // Validate geometry and compute derived values. Returns true if configuration fits the strip.
+  bool validateGeometry() {
+    segGroupLen = segPixels * 7;
+    // compute required pixels: numDigits blocks of 7*segPixels plus (numDigits-1)/2 colon blocks
+    requiredLength = baseOffset + (uint32_t)numDigits * segGroupLen + ((numDigits - 1) / 2) * dotPixels;
+    // strip.getLength() returns total LEDs
+    if (requiredLength > strip.getLength()) {
+      // disable usermod to avoid writing out of bounds
+      enabled = false;
+      return false;
+    }
+    enabled = true;
+    return true;
+  }
   // Compute starting LED index for a digit, including colon spacing
   uint16_t digitStart(uint8_t index) {
-    return baseOffset + (index * (segPixels * 7)) + ((index / 2) * dotPixels);
+    return baseOffset + (index * segGroupLen) + ((index / 2) * dotPixels);
   }
   // Render a single digit: lights OFF for segments not used by the digit
   // Lighting ON color comes from the running WLED effect; we only clear segments that are off
@@ -77,7 +95,10 @@ class SevenSegmentClockUsermod : public Usermod {
       uint16_t offset = digitBase + (mapIdx[s] * segPixels);
       bool on = ((digit >> (6 - s)) & 0x01);
       if (!on) {
-        for (uint16_t j = offset; j < offset + segPixels; j++) {
+        uint16_t end = offset + segPixels;
+        // clamp end to strip length to be safe
+        if (end > strip.getLength()) end = strip.getLength();
+        for (uint16_t j = offset; j < end; j++) {
           strip.setPixelColor(j, 0x000000);
         }
       }
@@ -94,7 +115,7 @@ class SevenSegmentClockUsermod : public Usermod {
     
     // first colon between hour and minute
     for (uint8_t i = 0; i < dotPixels; i++) {
-      uint16_t dot = baseOffset + 2 * (segPixels * 7) + i;
+      uint16_t dot = baseOffset + 2 * segGroupLen + i;
       if (!showDots) {
         strip.setPixelColor(dot, 0x000000); // hide
       } else if (blinkDotsEnabled && lastBlinkState) {
@@ -105,7 +126,7 @@ class SevenSegmentClockUsermod : public Usermod {
     // optional second colon between minute and second (for 6 digits)
     if (numDigits == 6) {
       for (uint8_t i = 0; i < dotPixels; i++) {
-        uint16_t dot2 = baseOffset + 4 * (segPixels * 7) + dotPixels + i;
+        uint16_t dot2 = baseOffset + 4 * segGroupLen + dotPixels + i;
         if (!showDots) {
           strip.setPixelColor(dot2, 0x000000); // hide
         } else if (blinkDotsEnabled && lastBlinkState) {
@@ -117,7 +138,7 @@ class SevenSegmentClockUsermod : public Usermod {
   }
 public:
   // Initialize mapping based on the configured order
-  void setup() override { applyOrder(); }
+  void setup() override { applyOrder(); validateGeometry(); }
   void loop() override {
     if (!enabled) return;
     if (millis() - lastUpdate < refreshMs) return;
@@ -220,6 +241,8 @@ public:
     if (numDigits != 4 && numDigits != 6) numDigits = 4;
     if (segPixels < 1) segPixels = 1;
     if (dotPixels < 1) dotPixels = 1;
+    // recompute derived geometry and validate against strip length
+    validateGeometry();
     return true;
   }
 };
