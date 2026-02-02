@@ -1,0 +1,4 @@
+{
+  "name": "seven_segment_clock",
+  "build": { "libArchive": false }
+}
