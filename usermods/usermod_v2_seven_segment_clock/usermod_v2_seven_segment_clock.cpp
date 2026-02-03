@@ -10,18 +10,18 @@ class SevenSegmentClockUsermod : public Usermod {
   // Buzzer hourly chime configuration and manager
   BuzzerManager buzzer;
   BuzzerManager::Config buzCfg;
-  bool buzzerEnabled = false;
+  bool buzzerEnabled = true;
   int8_t buzzerPin = 13;
   uint8_t buzzerType = 0; // 0=ACTIVE, 1=PASSIVE
-  uint8_t quietStartHour = 23;
-  uint8_t quietEndHour = 7;
-  char soundProfile[16] = "short";
+  uint8_t quietStartHour = 21;
+  uint8_t quietEndHour = 5;
+  char soundProfile[16] = "alarm";
   bool halfHourChime = false;
   bool testNow = false;
   // Boot/toggle behaviors
-  bool playOnBoot = false;
+  bool playOnBoot = true;
   char bootProfile[16] = "short";
-  bool playOnToggle = false;
+  bool playOnToggle = true;
   char toggleOnProfile[16] = "short";
   char toggleOffProfile[16] = "short";
   bool lastOnState = true;
@@ -39,8 +39,8 @@ class SevenSegmentClockUsermod : public Usermod {
   // First LED index for the clock block on the strip
   uint16_t baseOffset = 0;
   // 12‑hour mode and leading zero handling
-  bool useAmPm = false;
-  bool hideLeadingZeroHours = false;
+  bool useAmPm = true;
+  bool hideLeadingZeroHours = true;
   bool hideLeadingZeroMinutes = false;
   // Direction: by default data input and digit indexing go right-to-left.
   // Set to false to render left-to-right. Also ensure baseOffset points to the first digit in your chosen direction.
